@@ -1,0 +1,63 @@
+# ============================================================================
+# config.yaml
+#
+# Single source of truth for paths and parameters used across every batch.
+# Learners should only need to edit THIS file to point the pipeline at their
+# own data — no paths should be hardcoded inside the batch scripts.
+# ============================================================================
+
+dataset:
+  # Any BIDS-valid dataset works. For teaching, a small, fast public dataset
+  # is recommended, e.g. a 2-3 subject subset of OpenNeuro ds000114
+  # (https://openneuro.org/datasets/ds000114). Fetch it with datalad or the
+  # openneuro CLI *before* running the pipeline — see README.md.
+  bids_root: "./data/bids_dataset"
+  derivatives_root: "./data/derivatives"
+  task: "covertverbgeneration"          # BIDS task label to analyze
+  space: "MNI152NLin2009cAsym"          # normalization target label used in filenames
+  subjects: ["sub-01", "sub-02"]        # subset to run in a live teaching session
+  session: null                         # set to e.g. "ses-01" if the dataset uses sessions
+
+environment:
+  # Native FSL and ANTs installations are required (no Docker/Singularity).
+  # Set these to the install roots on the teaching machine, or rely on the
+  # tools already being on $PATH (recommended: verify with `which fsl` /
+  # `which antsRegistration` before the session).
+  fsl_dir: "${FSLDIR}"
+  ants_path: null                       # null = assume ANTs binaries are on $PATH
+  n_procs: 2                            # parallel processes for Nipype workflows
+  random_seed: 42
+
+preprocessing:
+  slice_timing_correction: true
+  brain_extraction_frac: 0.5            # BET -f parameter
+  motion_correction_reference: "middle" # "middle" volume as MCFLIRT reference
+  normalization:
+    method: "ants_syn"                  # "ants_syn" or "fsl_fnirt"
+    template: "MNI152_T1_2mm_brain"     # FSL standard-space template name
+
+denoising:
+  confound_strategy:
+    motion: "24_params"                 # 6 params + derivatives + squares + squared derivatives
+    use_acompcor: true
+    acompcor_n_components: 5
+    fd_scrubbing_threshold: 0.5         # mm; volumes above this are flagged, not deleted, by default
+    dvars_scrubbing_threshold: 1.5
+
+first_level:
+  hrf_model: "spm"
+  high_pass_hz: 0.008                   # 1/128s high-pass filter
+  smoothing_fwhm: 6.0                   # mm
+  contrasts:
+    # name: expression, evaluated against design matrix column names
+    task_vs_baseline: "task"
+
+second_level:
+  correction_method: "fdr"              # "fdr" or "cluster" (nonparametric permutation)
+  alpha: 0.05
+  cluster_permutations: 1000            # only used if correction_method == "cluster"
+
+output:
+  log_dir: "./logs"
+  report_dir: "./reports"
+  results_dir: "./results"

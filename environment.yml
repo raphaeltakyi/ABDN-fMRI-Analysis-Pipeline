@@ -1,0 +1,27 @@
+name: fmri-teaching-pipeline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - nilearn>=0.10.0
+  - nipype>=1.8.6
+  - nibabel>=5.0.0
+  - numpy>=1.24.0
+  - pandas>=2.0.0
+  - scipy>=1.10.0
+  - scikit-learn>=1.3.0
+  - matplotlib>=3.7.0
+  - seaborn>=0.12.0
+  - pyyaml>=6.0
+  - pip:
+      - pybids>=0.16.0
+
+# NOTE: FSL and ANTs are NOT conda/pip installable in a way that satisfies
+# this pipeline's use of their command-line tools directly. Install them
+# natively per their own instructions before running this pipeline:
+#   FSL:  https://fsl.fmrib.ox.ac.uk/fsl/fslwiki/FslInstallation
+#   ANTs: https://github.com/ANTsX/ANTs (or `conda install -c aramislab ants`
+#         as an unofficial but commonly used alternative)
+# Verify with `which bet`, `which mcflirt`, `which antsRegistration` before
+# running batch 2 — batch 0 will also check and warn you if they're missing.
