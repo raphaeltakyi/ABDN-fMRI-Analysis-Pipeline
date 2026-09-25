@@ -23,6 +23,14 @@ from typing import Any
 
 import yaml
 
+# Force FSL to write proper gzip-compressed NIfTI everywhere, in every batch
+# that imports utils. If $FSLOUTPUTTYPE is left to the shell it can differ
+# between machines, and a mismatch (FSL writing uncompressed data under a
+# .nii.gz name) produces files that FSL's own lenient tools read but that
+# strict readers — nibabel and FSL's newer applywarp — cannot open. Pinning it
+# here makes the whole pipeline's file format deterministic.
+os.environ["FSLOUTPUTTYPE"] = "NIFTI"
+
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 

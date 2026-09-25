@@ -36,6 +36,7 @@ before trusting the statistics that come out of fitting it.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -47,15 +48,28 @@ from utils import ensure_dir, get_logger, load_config
 
 
 def load_events(bids_root: str, sub: str, task: str) -> pd.DataFrame:
-    """Load the BIDS events.tsv (onset, duration, trial_type) for one subject/task."""
+    """Load the BIDS events.tsv (onset, duration, trial_type) for one subject/task.
+
+    Uses pybids to locate the file rather than constructing the path by hand,
+    so it correctly handles datasets that include a run entity in the filename
+    (e.g. sub-01_task-flanker_run-1_events.tsv) or place events under sessions.
+    """
+    from bids import BIDSLayout
+
     sub_id = sub.replace("sub-", "")
-    events_path = Path(bids_root) / sub / "func" / f"{sub}_task-{task}_events.tsv"
-    if not events_path.exists():
+    layout = BIDSLayout(bids_root)
+    event_files = layout.get(
+        subject=sub_id, task=task, suffix="events", extension=".tsv", return_type="file"
+    )
+    if not event_files:
         raise FileNotFoundError(
-            f"No events.tsv found for {sub} at {events_path}. First-level "
-            f"analysis requires task timing information."
+            f"No events.tsv found for {sub} / task-{task} anywhere in the BIDS "
+            f"dataset. First-level analysis requires task timing information."
         )
-    return pd.read_csv(events_path, sep="\t")
+    # If the dataset has multiple runs, this takes the first. A multi-run
+    # design would concatenate or model runs separately — see the note in the
+    # README about the pipeline's single-run assumption.
+    return pd.read_csv(event_files[0], sep="\t")
 
 
 def build_design_matrix(
@@ -129,7 +143,11 @@ def run(preprocessing_outputs: dict, confound_paths: dict, t_r: float) -> dict:
         out_dir = ensure_dir(Path(config["dataset"]["derivatives_root"]) / sub / "first_level")
 
         events = load_events(bids_root, sub, task)
-        bold_path = prep_paths["corrected_bold"]
+        # Use the MNI-space BOLD (batch 2's apply_func_to_mni_transform output),
+        # not the native-space corrected_bold used for confound extraction —
+        # group analysis in batch 5 requires every subject's voxels to be in
+        # the same template space.
+        bold_path = prep_paths["bold_in_mni"]
 
         import nibabel as nib
 
@@ -150,14 +168,26 @@ def run(preprocessing_outputs: dict, confound_paths: dict, t_r: float) -> dict:
 
         results[sub] = {}
         for contrast_name, contrast_expr in contrasts_cfg.items():
-            missing_cols = [
-                c for c in [contrast_expr] if c not in design_matrix.columns
-            ]
+            # A contrast expression may be a single condition name
+            # ("congruent_correct") or an arithmetic combination of several
+            # ("incongruent_correct - congruent_correct"). Validate that every
+            # CONDITION column referenced in the expression exists in the design
+            # matrix, rather than requiring the whole expression to be a single
+            # column name — nilearn's compute_contrast evaluates the arithmetic
+            # itself. Identifiers are extracted with a simple token regex;
+            # numbers and operators are ignored.
+            referenced = set(re.findall(r"[A-Za-z_]\w*", contrast_expr))
+            missing_cols = [c for c in referenced if c not in design_matrix.columns]
             if missing_cols:
                 logger.warning(
-                    "[%s] Contrast '%s' references column(s) %s not found in "
-                    "the design matrix (columns: %s). Skipping.",
-                    sub, contrast_name, missing_cols, list(design_matrix.columns),
+                    "[%s] Contrast '%s' references condition(s) %s not found in "
+                    "the design matrix. Available task/condition columns: %s. "
+                    "Skipping. (Check that these match trial_type values in "
+                    "events.tsv.)",
+                    sub, contrast_name, missing_cols,
+                    [c for c in design_matrix.columns
+                     if not c.startswith(("rot_", "trans_", "acompcor_", "drift_"))
+                     and c not in ("framewise_displacement", "dvars", "constant")],
                 )
                 continue
 

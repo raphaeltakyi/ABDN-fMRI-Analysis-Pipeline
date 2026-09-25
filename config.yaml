@@ -11,11 +11,11 @@ dataset:
   # is recommended, e.g. a 2-3 subject subset of OpenNeuro ds000114
   # (https://openneuro.org/datasets/ds000114). Fetch it with datalad or the
   # openneuro CLI *before* running the pipeline — see README.md.
-  bids_root: "./data/bids_dataset"
+  bids_root: "/Users/raphaeltakyi/Desktop/ABDN/Flanker"
   derivatives_root: "./data/derivatives"
-  task: "covertverbgeneration"          # BIDS task label to analyze
+  task: "flanker"          # BIDS task label to analyze
   space: "MNI152NLin2009cAsym"          # normalization target label used in filenames
-  subjects: ["sub-01", "sub-02"]        # subset to run in a live teaching session
+  subjects: ["sub-01", sub-02]        # subset to run in a live teaching session
   session: null                         # set to e.g. "ses-01" if the dataset uses sessions
 
 environment:
@@ -33,7 +33,7 @@ preprocessing:
   brain_extraction_frac: 0.5            # BET -f parameter
   motion_correction_reference: "middle" # "middle" volume as MCFLIRT reference
   normalization:
-    method: "ants_syn"                  # "ants_syn" or "fsl_fnirt"
+    method: "fsl_fnirt"                  # "ants_syn" or "fsl_fnirt"
     template: "MNI152_T1_2mm_brain"     # FSL standard-space template name
 
 denoising:
@@ -49,8 +49,14 @@ first_level:
   high_pass_hz: 0.008                   # 1/128s high-pass filter
   smoothing_fwhm: 6.0                   # mm
   contrasts:
-    # name: expression, evaluated against design matrix column names
-    task_vs_baseline: "task"
+    # name: expression, evaluated against design matrix column names.
+    # The column names come from the trial_type values in your events.tsv.
+    # For this flanker dataset the conditions are 'congruent_correct' and
+    # 'incongruent_correct'. Expressions may combine columns arithmetically
+    # (e.g. differences), not just name a single column.
+    incongruent_vs_congruent: "incongruent_correct - congruent_correct"
+    congruent_vs_baseline: "congruent_correct"
+    incongruent_vs_baseline: "incongruent_correct"
 
 second_level:
   correction_method: "fdr"              # "fdr" or "cluster" (nonparametric permutation)

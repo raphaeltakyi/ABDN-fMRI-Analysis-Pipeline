@@ -40,6 +40,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 from bids import BIDSLayout
+from nilearn.masking import compute_epi_mask
 
 from utils import ensure_dir, get_logger, load_config
 
@@ -83,13 +84,21 @@ def compute_tsnr(bold_path: Path) -> tuple[np.ndarray, float]:
     standard, fast first-pass indicator of data quality that doesn't require
     any preprocessing to compute.
 
+    Because this runs on RAW, non-skull-stripped data (brain extraction
+    doesn't happen until batch 2), the median must be restricted to an actual
+    brain mask — not just "any voxel with positive mean" — or background/
+    scalp voxels dominated by thermal noise (where mean ~ std, so tSNR
+    collapses toward 1-3) will swamp the median and make even good data look
+    unusable. We use nilearn's compute_epi_mask, which separates brain from
+    background using a validated intensity-histogram heuristic rather than an
+    arbitrary percentile cutoff.
+
     Returns
     -------
     tsnr_map : np.ndarray
-        3D tSNR map.
+        3D tSNR map (full field of view, not masked — useful for visual QC).
     median_tsnr : float
-        Median tSNR within brain-signal voxels (mean > 0), a single summary
-        number per run.
+        Median tSNR within the estimated brain mask only.
     """
     img = nib.load(bold_path)
     data = img.get_fdata()  # shape: (x, y, z, t)
@@ -100,7 +109,9 @@ def compute_tsnr(bold_path: Path) -> tuple[np.ndarray, float]:
     with np.errstate(divide="ignore", invalid="ignore"):
         tsnr_map = np.where(std_img > 0, mean_img / std_img, 0)
 
-    brain_mask = mean_img > np.percentile(mean_img[mean_img > 0], 10)
+    brain_mask_img = compute_epi_mask(img)
+    brain_mask = brain_mask_img.get_fdata().astype(bool)
+
     median_tsnr = float(np.median(tsnr_map[brain_mask]))
 
     return tsnr_map, median_tsnr

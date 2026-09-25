@@ -54,7 +54,7 @@ def load_motion_params(par_file: Path) -> pd.DataFrame:
     """Load MCFLIRT's .par file: 6 columns (3 rotations in radians, then 3
     translations in mm), one row per volume."""
     cols = ["rot_x", "rot_y", "rot_z", "trans_x", "trans_y", "trans_z"]
-    df = pd.read_csv(par_file, delim_whitespace=True, header=None, names=cols)
+    df = pd.read_csv(par_file, sep=r"\s+", header=None, names=cols)
     return df
 
 
@@ -94,13 +94,32 @@ def compute_fd(motion_df: pd.DataFrame, head_radius_mm: float = 50.0) -> np.ndar
 
 
 def compute_dvars(bold_data: np.ndarray) -> np.ndarray:
-    """Compute DVARS: the root-mean-square of the temporal derivative of the
-    BOLD signal across all voxels, a standard complementary motion/artifact
-    index to FD."""
-    diff = np.diff(bold_data, axis=-1)  # (x, y, z, t-1)
-    dvars = np.sqrt(np.mean(diff**2, axis=(0, 1, 2)))
-    dvars = np.insert(dvars, 0, 0)  # align length with n_volumes
-    return dvars
+    """Compute standardized DVARS: the root-mean-square of the temporal
+    derivative of the BOLD signal across brain voxels, then z-standardized so a
+    unitless threshold (e.g. 1.5) is meaningful.
+
+    Raw DVARS scales with the data's intensity units (raw BOLD can be in the
+    hundreds or thousands), so comparing it to a fixed small threshold would
+    flag almost every volume. Restricting to in-brain voxels and standardizing
+    to (value - median) / SD gives the conventional unitless DVARS that a
+    threshold around 1.5 is calibrated for.
+    """
+    # In-brain voxels only: background/air voxels are pure noise and would
+    # dominate a whole-volume RMS.
+    mean_img = bold_data.mean(axis=-1)
+    brain_mask = mean_img > np.percentile(mean_img[mean_img > 0], 25)
+
+    brain_ts = bold_data[brain_mask]  # (n_brain_voxels, t)
+    diff = np.diff(brain_ts, axis=-1)  # (n_brain_voxels, t-1)
+    dvars = np.sqrt(np.mean(diff**2, axis=0))  # (t-1,)
+
+    # Standardize to unitless values comparable to a fixed threshold.
+    median = np.median(dvars)
+    sd = np.std(dvars)
+    dvars_std = (dvars - median) / sd if sd > 0 else np.zeros_like(dvars)
+
+    dvars_std = np.insert(dvars_std, 0, 0)  # align length with n_volumes
+    return dvars_std
 
 
 def compute_acompcor(bold_data: np.ndarray, wm_csf_mask: np.ndarray, n_components: int) -> pd.DataFrame:
@@ -124,7 +143,7 @@ def build_confounds_table(
     config: dict,
 ) -> pd.DataFrame:
     """Assemble the full confounds table for one subject/run."""
-    denoise_cfg = config["denoising"]
+    denoise_cfg = config["denoising"]["confound_strategy"]
 
     motion_df = load_motion_params(motion_params_path)
     motion_expanded = expand_to_24_param_model(motion_df)
@@ -167,6 +186,7 @@ def run(preprocessing_outputs: dict) -> dict:
 
     config = load_config()
     logger = get_logger(__name__, config["output"]["log_dir"])
+    denoise_cfg = config["denoising"]["confound_strategy"]
 
     confound_paths = {}
     for sub, paths in preprocessing_outputs.items():
@@ -199,8 +219,8 @@ def run(preprocessing_outputs: dict) -> dict:
             sub,
             n_flagged,
             len(confounds_df),
-            config["denoising"]["fd_scrubbing_threshold"],
-            config["denoising"]["dvars_scrubbing_threshold"],
+            denoise_cfg["fd_scrubbing_threshold"],
+            denoise_cfg["dvars_scrubbing_threshold"],
         )
         if n_flagged / len(confounds_df) > 0.25:
             logger.warning(
