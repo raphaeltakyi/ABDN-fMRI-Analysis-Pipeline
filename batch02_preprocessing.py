@@ -222,18 +222,125 @@ def compute_mean_image(bold_path: Path, out_dir: Path, logger) -> Path:
     return resolve_fsl_output(result.outputs.out_file, logger)
 
 
-def coregister_func_to_anat(mean_func: Path, brain_anat: Path, out_dir: Path, logger) -> Path:
-    """Compute the rigid-body transform aligning the mean functional image to
-    the subject's own anatomical image, using FSL FLIRT with boundary-based
-    registration cost (bbr) — the standard, most accurate FSL option for this."""
+def segment_anatomical(brain_anat: Path, out_dir: Path, logger) -> dict:
+    """Segment the brain-extracted T1 into CSF / grey / white matter with FSL
+    FAST, and derive a binary white-matter mask for boundary-based registration.
+
+    BBR (below) aligns the functional image to the white-matter surface, so it
+    needs a WM segmentation. FAST also gives the CSF and WM probability maps
+    that a proper aCompCor confound step would use (replacing batch 3's
+    placeholder mask), so this segmentation is worth computing once here.
+
+    Returns a dict with the WM binary mask ('wmseg'), and the WM and CSF
+    partial-volume maps ('wm_pve', 'csf_pve').
+    """
+    import subprocess
+
+    import numpy as np
+
+    # Call FSL `fast` directly rather than through nipype's FAST interface.
+    # nipype's FAST output handling forces the segmentation filename into the
+    # current working directory (it strips the directory from out_basename),
+    # which put the output at the project root and then failed to find it.
+    # FSL's own `-o` flag honours a full absolute path, so a direct call writes
+    # every output into the subject's preproc folder as intended.
+    brain_anat_abs = Path(brain_anat).resolve()
+    out_base = (Path(out_dir) / "fast").resolve()
+
+    cmd = ["fast", "-n", "3", "-o", str(out_base), str(brain_anat_abs)]
+    logger.debug("Running FAST (segmentation): %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"FSL fast failed (exit {result.returncode}). stderr:\n{result.stderr}"
+        )
+
+    # FAST writes partial-volume estimate maps next to out_base:
+    # <out_base>_pve_0=CSF, _pve_1=GM, _pve_2=WM.
+    pve_csf = resolve_fsl_output(out_base.parent / "fast_pve_0.nii", logger)
+    pve_wm = resolve_fsl_output(out_base.parent / "fast_pve_2.nii", logger)
+
+    # Binarize the WM partial-volume map at 0.5 to get the WM boundary segmentation.
+    wm_img = nib.load(str(pve_wm))
+    wm_bin = (wm_img.get_fdata() > 0.5).astype("uint8")
+    wmseg_path = (Path(out_dir) / "wmseg.nii").resolve()
+    nib.save(nib.Nifti1Image(wm_bin, wm_img.affine), str(wmseg_path))
+    logger.debug("WM segmentation for BBR written to %s", wmseg_path)
+
+    return {"wmseg": wmseg_path, "wm_pve": pve_wm, "csf_pve": pve_csf}
+
+
+def coregister_func_to_anat(
+    mean_func: Path, anat_head: Path, brain_anat: Path, wmseg: Path, out_dir: Path, logger
+) -> Path:
+    """Align the mean functional to the subject's anatomical using FSL's
+    boundary-based registration (BBR) — the current gold standard for
+    EPI-to-structural coregistration.
+
+    BBR works in two stages, following FSL's epi_reg recipe:
+      1. A standard 6-DOF FLIRT (correlation-ratio cost) gives a rough initial
+         alignment to the brain-extracted T1.
+      2. FLIRT then refines that alignment with the 'bbr' cost function, which
+         maximizes the intensity gradient across the white-matter surface
+         (supplied as `wmseg`) rather than matching whole-image intensities.
+         This is far more robust to the intensity differences between EPI and
+         T1 that make plain intensity-based registration drift — the cause of
+         functional data landing mis-scaled or outside the brain after
+         normalization.
+
+    The BBR step registers against the WHOLE-HEAD T1 (`anat_head`), not the
+    skull-stripped brain, because BBR samples intensities on both sides of the
+    WM boundary.
+
+    Returns the func->anat affine matrix (FSL .mat), used as the premat when
+    the functional data is warped to MNI.
+    """
+    import os
+
+    # Use absolute paths throughout — the BBR FLIRT call takes several file
+    # inputs (schedule, wm_seg, init matrix) and relative paths have proven
+    # fragile with nipype's FSL interfaces.
+    mean_func = Path(mean_func).resolve()
+    anat_head = Path(anat_head).resolve()
+    brain_anat = Path(brain_anat).resolve()
+    wmseg = Path(wmseg).resolve()
+    out_dir = Path(out_dir).resolve()
+
+    fsl_dir = os.environ.get("FSLDIR")
+    if not fsl_dir:
+        raise EnvironmentError(
+            "FSLDIR is not set in the environment, so the BBR schedule file "
+            "cannot be located. Source your FSL installation before running."
+        )
+    bbr_schedule = Path(fsl_dir) / "etc" / "flirtsch" / "bbr.sch"
+    if not bbr_schedule.exists():
+        raise FileNotFoundError(
+            f"BBR schedule not found at {bbr_schedule}. Check the FSL installation."
+        )
+
+    # Stage 1: rough initial alignment to the brain-extracted T1.
+    init_mat = out_dir / "func_to_anat_init.mat"
+    flirt_init = fsl.FLIRT()
+    flirt_init.inputs.in_file = str(mean_func)
+    flirt_init.inputs.reference = str(brain_anat)
+    flirt_init.inputs.out_matrix_file = str(init_mat)
+    flirt_init.inputs.dof = 6
+    logger.debug("Running FLIRT (init, func->anat): %s", flirt_init.cmdline)
+    flirt_init.run()
+
+    # Stage 2: BBR refinement against the whole-head T1 using the WM boundary.
     out_mat = out_dir / "func_to_anat.mat"
-    flirt = fsl.FLIRT()
-    flirt.inputs.in_file = str(mean_func)
-    flirt.inputs.reference = str(brain_anat)
-    flirt.inputs.out_matrix_file = str(out_mat)
-    flirt.inputs.dof = 6  # rigid body: functional and anatomical are the same brain
-    logger.debug("Running FLIRT (func->anat): %s", flirt.cmdline)
-    flirt.run()
+    flirt_bbr = fsl.FLIRT()
+    flirt_bbr.inputs.in_file = str(mean_func)
+    flirt_bbr.inputs.reference = str(anat_head)
+    flirt_bbr.inputs.out_matrix_file = str(out_mat)
+    flirt_bbr.inputs.in_matrix_file = str(init_mat)
+    flirt_bbr.inputs.cost = "bbr"
+    flirt_bbr.inputs.wm_seg = str(wmseg)
+    flirt_bbr.inputs.schedule = str(bbr_schedule)
+    flirt_bbr.inputs.dof = 6
+    logger.debug("Running FLIRT (BBR, func->anat): %s", flirt_bbr.cmdline)
+    flirt_bbr.run()
     return out_mat
 
 
@@ -522,8 +629,18 @@ def preprocess_subject(sub: str, layout_paths: dict, config: dict, logger) -> di
     logger.info("[%s] Computing mean functional image", sub)
     mean_func = compute_mean_image(corrected_bold, out_dir, logger)
 
-    logger.info("[%s] Coregistration (func -> anat)", sub)
-    func_to_anat_mat = coregister_func_to_anat(mean_func, brain_anat, out_dir, logger)
+    logger.info("[%s] Tissue segmentation (FSL FAST)", sub)
+    segmentation = segment_anatomical(brain_anat, out_dir, logger)
+
+    logger.info("[%s] Coregistration (func -> anat, boundary-based / BBR)", sub)
+    func_to_anat_mat = coregister_func_to_anat(
+        mean_func,
+        Path(layout_paths["anat"]),  # whole-head T1 for the BBR stage
+        brain_anat,
+        segmentation["wmseg"],
+        out_dir,
+        logger,
+    )
 
     logger.info("[%s] Normalization (anat -> MNI, method=%s)", sub, prep_cfg["normalization"]["method"])
     normalization = normalize_anat_to_mni(
@@ -559,6 +676,11 @@ def preprocess_subject(sub: str, layout_paths: dict, config: dict, logger) -> di
         "motion_params": motion_params,
         "func_to_anat_mat": func_to_anat_mat,
         "anat_in_mni": normalization["warped_image"],
+        # Tissue segmentation (WM/CSF) from FAST, in anatomical space. Available
+        # for a future upgrade of batch 3's aCompCor from the placeholder mask
+        # to a real WM/CSF-based one.
+        "wm_pve": segmentation["wm_pve"],
+        "csf_pve": segmentation["csf_pve"],
     }
 
 
@@ -572,6 +694,7 @@ def run() -> dict:
     require_executable("bet")
     require_executable("mcflirt")
     require_executable("flirt")
+    require_executable("fast")  # tissue segmentation for BBR coregistration
     if config["preprocessing"]["normalization"]["method"] == "ants_syn":
         require_executable("antsRegistration")
         require_executable("antsApplyTransforms")

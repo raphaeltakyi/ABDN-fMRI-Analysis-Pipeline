@@ -15,7 +15,7 @@ dataset:
   derivatives_root: "./data/derivatives"
   task: "flanker"          # BIDS task label to analyze
   space: "MNI152NLin2009cAsym"          # normalization target label used in filenames
-  subjects: ["sub-01", sub-02]        # subset to run in a live teaching session
+  subjects: ["sub-01", "sub-02", "sub-03"]        # subset to run in a live teaching session
   session: null                         # set to e.g. "ses-01" if the dataset uses sessions
 
 environment:

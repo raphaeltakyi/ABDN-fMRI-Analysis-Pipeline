@@ -103,10 +103,29 @@ def build_design_matrix(
 def fit_first_level_model(
     bold_path: Path, design_matrix: pd.DataFrame, t_r: float, smoothing_fwhm: float
 ) -> FirstLevelModel:
-    """Fit the GLM to one subject's preprocessed, MNI-space BOLD data."""
+    """Fit the GLM to one subject's preprocessed, MNI-space BOLD data.
+
+    The GLM is restricted to the canonical MNI152 brain mask. Because the data
+    is already in MNI space, masking with the standard-brain template (rather
+    than a mask derived from the EPI itself) guarantees that every voxel with a
+    statistic falls inside the same brain boundary the glass-brain plots draw —
+    so no statistics land outside the brain outline. nilearn resamples the mask
+    to the data grid automatically.
+
+    Note: the glass-brain view is a projection through the whole brain, so
+    edge-of-brain activation can still *appear* to touch the outline even when
+    it is inside in 3D. That is a display property of glass brains, not
+    out-of-brain signal; an orthogonal slice view (plot_stat_map) shows the
+    true in-brain location.
+    """
+    from nilearn.datasets import load_mni152_brain_mask
+
+    brain_mask = load_mni152_brain_mask(resolution=2)
+
     model = FirstLevelModel(
         t_r=t_r,
         smoothing_fwhm=smoothing_fwhm,
+        mask_img=brain_mask,
         minimize_memory=False,  # keep residuals available for QC/reporting
     )
     model.fit(str(bold_path), design_matrices=design_matrix)
